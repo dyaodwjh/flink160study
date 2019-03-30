@@ -130,7 +130,7 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 	//flink的jar文件路径
 	private Path flinkJarPath;
 
-	//动态配置
+	//编码后的动态配置,其实就是用 @@ 分割各个配置
 	private String dynamicPropertiesEncoded;
 
 	/** Lazily initialized list of files to ship. */
@@ -247,9 +247,9 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 
 	/**
 	 * Returns true if the descriptor has the job jars to include in the classpath.
+	 *
 	 * 如果 descriptor 中有 要包含在 类路径 中的 job jars 则返回true
 	 * 如果传入的 jar 列表中有任一个 jar 不属于 用户jar列表则返回false
-	 *
 	 */
 	public boolean hasUserJarFiles(List<URL> requiredJarFiles) {
 		if (userJarInclusion == YarnConfigOptions.UserJarInclusion.DISABLED) {
@@ -388,7 +388,7 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 
 	// -------------------------------------------------------------
 	// Lifecycle management
-	// 声明周期管理
+	// 生命周期管理
 	// -------------------------------------------------------------
 
 	@Override
@@ -546,9 +546,13 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 			@Nullable JobGraph jobGraph,
 			boolean detached) throws Exception {
 
-		// ------------------ Check if configuration is valid --------------------
+		// ------------------ 检查配置是否正确   --------------------
+		// 主要就是检查内存相关的参数
 		validateClusterSpecification(clusterSpecification);
 
+		//判断是否权限  采用 SIMPLE
+		//其实就是判断是否使用 KERBEROS 作为权限校验方式
+		//这里忽略不分析
 		if (UserGroupInformation.isSecurityEnabled()) {
 			// note: UGI::hasKerberosCredentials inaccurately reports false
 			// for logins based on a keytab (fixed in Hadoop 2.6.1, see HADOOP-10786),
@@ -564,26 +568,29 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 			}
 		}
 
+		//判断是否准备好了要部署,核心就是判断cpu核数和内存数是否能够满足运行要求
 		isReadyForDeployment(clusterSpecification);
 
-		// ------------------ Check if the specified queue exists --------------------
-
+		// ------------------  检查设置的队列是否存在  --------------------
+		//仅仅是检查队列是否存在,如果不存在则打印 warn 信息 ,但是不会有任何实质性的 操作逻辑
 		checkYarnQueues(yarnClient);
 
-		// ------------------ Add dynamic properties to local flinkConfiguraton ------
+		// ------------------ 给本地的 flinkConfiguraton 添加动态配置 ------
 		Map<String, String> dynProperties = getDynamicProperties(dynamicPropertiesEncoded);
 		for (Map.Entry<String, String> dynProperty : dynProperties.entrySet()) {
 			flinkConfiguration.setString(dynProperty.getKey(), dynProperty.getValue());
 		}
 
-		// ------------------ Check if the YARN ClusterClient has the requested resources --------------
+		// ------------------ 检查 yarn cluster client 是否有请求的资源  --------------
 
-		// Create application via yarnClient
+		//通过yarn client 创建应用
 		final YarnClientApplication yarnApplication = yarnClient.createApplication();
 		final GetNewApplicationResponse appResponse = yarnApplication.getNewApplicationResponse();
 
+		//获取当前为了这个应用 最大可申请的单个Container占用的资源量
 		Resource maxRes = appResponse.getMaximumResourceCapability();
 
+		//获取当前集群可用资源信息
 		final ClusterResourceDescription freeClusterMem;
 		try {
 			freeClusterMem = getCurrentFreeClusterResources(yarnClient);
@@ -592,20 +599,23 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 			throw new YarnDeploymentException("Could not retrieve information about free cluster resources.", e);
 		}
 
+		//获取配置的 RM 最小调度内存  yarn.scheduler.minimum-allocation-mb 配置信息
 		final int yarnMinAllocationMB = yarnConfiguration.getInt(YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_MB, 0);
 
+		//有效的集群配置信息
 		final ClusterSpecification validClusterSpecification;
 		try {
 			validClusterSpecification = validateClusterResources(
-				clusterSpecification,
-				yarnMinAllocationMB,
-				maxRes,
-				freeClusterMem);
+				clusterSpecification, //集群规格信息
+				yarnMinAllocationMB,//最小分配内存
+				maxRes,//最大内存
+				freeClusterMem); //当前可用内存
 		} catch (YarnDeploymentException yde) {
 			failSessionDuringDeployment(yarnClient, yarnApplication);
 			throw yde;
 		}
 
+		//打印有效的配置信息
 		LOG.info("Cluster specification: {}", validClusterSpecification);
 
 		final ClusterEntrypoint.ExecutionMode executionMode = detached ?
@@ -643,16 +653,31 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 			true);
 	}
 
+	/**
+	 *  验证集群资源
+	 * @param clusterSpecification
+	 * @param yarnMinAllocationMB
+	 * @param maximumResourceCapability
+	 * @param freeClusterResources
+	 * @return
+	 * @throws YarnDeploymentException
+	 */
 	protected ClusterSpecification validateClusterResources(
 		ClusterSpecification clusterSpecification,
 		int yarnMinAllocationMB,
 		Resource maximumResourceCapability,
 		ClusterResourceDescription freeClusterResources) throws YarnDeploymentException {
 
+		//获取 TM 的数量
 		int taskManagerCount = clusterSpecification.getNumberTaskManagers();
+		//获取JM的内存数量
 		int jobManagerMemoryMb = clusterSpecification.getMasterMemoryMB();
+		//获取TM的内存数量
 		int taskManagerMemoryMb = clusterSpecification.getTaskManagerMemoryMB();
 
+		//如果 设置的 JM 内存数量小于 yarnMinAllocationMB 或者 TM设置的内存数量小于 yarnMinAllocationMB
+		//则打印警告,说当前 container 申请的内存过小,会按照 yarn 配置文件中的 yarn.scheduler.minimum-allocation-mb 这个配置的值设置 container 内存
+		//而不是我们设置的 内存值
 		if (jobManagerMemoryMb < yarnMinAllocationMB || taskManagerMemoryMb < yarnMinAllocationMB) {
 			LOG.warn("The JobManager or TaskManager memory is below the smallest possible YARN Container size. "
 				+ "The value of 'yarn.scheduler.minimum-allocation-mb' is '" + yarnMinAllocationMB + "'. Please increase the memory size." +
@@ -660,7 +685,7 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 				"you requested will start.");
 		}
 
-		// set the memory to minAllocationMB to do the next checks correctly
+		//如果 内存设置过小,则将其设置为yarn允许的最小内存,即yarn配置中 yarn.scheduler.minimum-allocation-mb 这个的值
 		if (jobManagerMemoryMb < yarnMinAllocationMB) {
 			jobManagerMemoryMb =  yarnMinAllocationMB;
 		}
@@ -669,46 +694,67 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 		}
 
 		final String note = "Please check the 'yarn.scheduler.maximum-allocation-mb' and the 'yarn.nodemanager.resource.memory-mb' configuration values\n";
+
+		//如果设置的JM内存大于 当前 单个container 可用的最大内存则排除异常
 		if (jobManagerMemoryMb > maximumResourceCapability.getMemory()) {
 			throw new YarnDeploymentException("The cluster does not have the requested resources for the JobManager available!\n"
 				+ "Maximum Memory: " + maximumResourceCapability.getMemory() + "MB Requested: " + jobManagerMemoryMb + "MB. " + note);
 		}
 
+		//如果设置的TM内存大于 当前 单个container 可用的最大内存则排除异常
 		if (taskManagerMemoryMb > maximumResourceCapability.getMemory()) {
 			throw new YarnDeploymentException("The cluster does not have the requested resources for the TaskManagers available!\n"
 				+ "Maximum Memory: " + maximumResourceCapability.getMemory() + " Requested: " + taskManagerMemoryMb + "MB. " + note);
 		}
 
+		/***
+		 *  FLink 的 yarn 客户端将尝试分配 yarn session.
+		 *  但是,因为当前集群的资源不是可用的,所以 可能不是所有的TM一开始就处于连接状态.
+		 *  分配程序可能需要比通常更多的时间,因为flink yarn 客户端 需要等待直到资源处于可用状态
+		 */
 		final String noteRsc = "\nThe Flink YARN client will try to allocate the YARN session, but maybe not all TaskManagers are " +
 			"connecting from the beginning because the resources are currently not available in the cluster. " +
 			"The allocation might take more time than usual because the Flink YARN client needs to wait until " +
 			"the resources become available.";
+
+		// 需要的总内存 = 单个JM内存+TM个数*单个TM内存
 		int totalMemoryRequired = jobManagerMemoryMb + taskManagerMemoryMb * taskManagerCount;
 
+		//当空闲内存小于需要的总内存的时候打印警告信息
 		if (freeClusterResources.totalFreeMemory < totalMemoryRequired) {
 			LOG.warn("This YARN session requires " + totalMemoryRequired + "MB of memory in the cluster. "
 				+ "There are currently only " + freeClusterResources.totalFreeMemory + "MB available." + noteRsc);
 
 		}
+
+		//当单个TM需要的内存 大于 空闲内存的单个container内存上线时候打印警告信息
 		if (taskManagerMemoryMb > freeClusterResources.containerLimit) {
 			LOG.warn("The requested amount of memory for the TaskManagers (" + taskManagerMemoryMb + "MB) is more than "
 				+ "the largest possible YARN container: " + freeClusterResources.containerLimit + noteRsc);
 		}
+
+		//当单个JM 需要的内存 大于 空闲内存的单个container内存上线时候打印警告信息
 		if (jobManagerMemoryMb > freeClusterResources.containerLimit) {
 			LOG.warn("The requested amount of memory for the JobManager (" + jobManagerMemoryMb + "MB) is more than "
 				+ "the largest possible YARN container: " + freeClusterResources.containerLimit + noteRsc);
 		}
 
-		// ----------------- check if the requested containers fit into the cluster.
-
+		// ----------------- 检查 需要的 container是否适合集群
+		//拷贝  每个 NM 的 可用内存数 到一个新的数组
 		int[] nmFree = Arrays.copyOf(freeClusterResources.nodeManagersFree, freeClusterResources.nodeManagersFree.length);
-		// first, allocate the jobManager somewhere.
+
+		//首先,在某处分配JM的内存
+		//即循环NM 可用内存,找到第一个 单个NM 可用内存满足JM 内存需求的 NM 就是要分配的位置
+		//如果没有找到,则打印警告但是不会抛出异常
 		if (!allocateResource(nmFree, jobManagerMemoryMb)) {
 			LOG.warn("Unable to find a NodeManager that can fit the JobManager/Application master. " +
 				"The JobManager requires " + jobManagerMemoryMb + "MB. NodeManagers available: " +
 				Arrays.toString(freeClusterResources.nodeManagersFree) + noteRsc);
 		}
-		// allocate TaskManagers
+
+		//然后,循环TM列表,为每个TM 分配 内存
+		//即循环NM 可用内存,找到第一个 单个 NM 可用内存满足 TM 内存需求的 NM 就是要分配的位置
+		//如果没有找到,则打印警告但是不会抛出异常
 		for (int i = 0; i < taskManagerCount; i++) {
 			if (!allocateResource(nmFree, taskManagerMemoryMb)) {
 				LOG.warn("There is not enough memory available in the YARN cluster. " +
@@ -719,6 +765,8 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 			}
 		}
 
+		//返回集群规格信息
+		//包括 JM内存.单个TM内存,TM数量,每个TM的槽数 这些内容
 		return new ClusterSpecification.ClusterSpecificationBuilder()
 			.setMasterMemoryMB(jobManagerMemoryMb)
 			.setTaskManagerMemoryMB(taskManagerMemoryMb)
@@ -728,9 +776,16 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 
 	}
 
+	/**
+	 * 检查yarn的队列
+	 * @param yarnClient
+	 */
 	private void checkYarnQueues(YarnClient yarnClient) {
 		try {
+			//获取yarn的所有队列信息
 			List<QueueInfo> queues = yarnClient.getAllQueues();
+			//如果队列列表大于0 并且这个任务有设置yarn队列的情况下执行以下逻辑:  通过 队列名称 寻找yarn 的队列列表里面有没有符合的队列,否则就打印日志信息,但是不会抛出异常
+			//否则打印 debug日志 说明 当前没有队列 要求,不会抛出异常
 			if (queues.size() > 0 && this.yarnQueue != null) { // check only if there are queues configured in yarn and for this session.
 				boolean queueFound = false;
 				for (QueueInfo queue : queues) {
@@ -758,6 +813,18 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 		}
 	}
 
+	/**
+	 *  启动 AM
+	 * @param configuration
+	 * @param applicationName
+	 * @param yarnClusterEntrypoint
+	 * @param jobGraph
+	 * @param yarnClient
+	 * @param yarnApplication
+	 * @param clusterSpecification
+	 * @return
+	 * @throws Exception
+	 */
 	public ApplicationReport startAppMaster(
 			Configuration configuration,
 			String applicationName,
@@ -767,22 +834,26 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 			YarnClientApplication yarnApplication,
 			ClusterSpecification clusterSpecification) throws Exception {
 
-		// ------------------ Initialize the file systems -------------------------
+		// ------------------ 根据 flink  配置对象 configuration  初始化文件系统  -------------------------
 
 		try {
+			//初始化 flink 的文件系统
 			org.apache.flink.core.fs.FileSystem.initialize(configuration);
 		} catch (IOException e) {
 			throw new IOException("Error while setting the default " +
 					"filesystem scheme from configuration.", e);
 		}
 
-		// initialize file system
-		// Copy the application master jar to the filesystem
-		// Create a local resource to point to the destination jar path
+		// 根据传入的 配置信息 初始化 hadoop 的文件系统
+		// 复制 AM 的jar 到文件系统
+		// 创建一个本地资源 以指向 目标 jar 的路径
 		final FileSystem fs = FileSystem.get(yarnConfiguration);
+		//返回当前用户的home路径,默认是/user/$USER/
 		final Path homeDir = fs.getHomeDirectory();
 
-		// hard coded check for the GoogleHDFS client because its not overriding the getScheme() method.
+		// 对GoogleHDFS客户端进行硬编码检查，因为它没有覆盖getScheme（）方法。
+		//检查的逻辑是 如果 文件系统的类名不是 GoogleHadoopFileSystem 则 文件的 scheme 不能以 file开头,因为 flink 的yarn 客户端需要存储他们的文件到一个分布式的文件存储系统
+		// 检查失败则打印 warn信息 ,不会抛出异常
 		if (!fs.getClass().getSimpleName().equals("GoogleHadoopFileSystem") &&
 				fs.getScheme().startsWith("file")) {
 			LOG.warn("The file system scheme is '" + fs.getScheme() + "'. This indicates that the "
@@ -790,19 +861,27 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 					+ "The Flink YARN client needs to store its files in a distributed file system");
 		}
 
+		//获取 应用 的 提交信息
 		ApplicationSubmissionContext appContext = yarnApplication.getApplicationSubmissionContext();
+		//创建要打包上传的文件集合
 		Set<File> systemShipFiles = new HashSet<>(shipFiles.size());
+
+		// 遍历要打包的文件列表,循环加到集合中
 		for (File file : shipFiles) {
 			systemShipFiles.add(file.getAbsoluteFile());
 		}
 
-		//check if there is a logback or log4j file
+		//检查配置目录下是否有 logback.xml 配置文件内容
+		//如果有的话加到 打包的文件集合中,并设置存在logback 配置文件
 		File logbackFile = new File(configurationDirectory + File.separator + CONFIG_FILE_LOGBACK_NAME);
 		final boolean hasLogback = logbackFile.exists();
 		if (hasLogback) {
 			systemShipFiles.add(logbackFile);
 		}
 
+         //检查配置目录下是否有 log4j.properties 配置文件内容
+		//如果有的话加到 打包的文件集合中,并设置存在log4j 配置文件
+		//如果发现 logback 和log4j 配置文件都存在,则打印警告信息,但是 不会抛出异常
 		File log4jFile = new File(configurationDirectory + File.separator + CONFIG_FILE_LOG4J_NAME);
 		final boolean hasLog4j = log4jFile.exists();
 		if (hasLog4j) {
@@ -814,21 +893,28 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 			}
 		}
 
+		//将要打包上传的文件加到 lib文件夹中
 		addLibFolderToShipFiles(systemShipFiles);
 
-		// Set-up ApplicationSubmissionContext for the application
+		// 为应用程序设置ApplicationSubmissionContext
 
+		// 获取应用的appId
 		final ApplicationId appId = appContext.getApplicationId();
 
-		// ------------------ Add Zookeeper namespace to local flinkConfiguraton ------
+		// ------------------ 将zk 的 命名空间 加到 本地的 flink配置对象中  ------
+		//获取zk命名空间的值
 		String zkNamespace = getZookeeperNamespace();
-		// no user specified cli argument for namespace?
+		//没有用户为命名空间指定cli参数？
+		//如果 zk命名空间为空,
+		// 则 读取 flink配置的high-availability.cluster-id 这个值,
+		// 如果上面的配置没有值,则读取  high-availability.zookeeper.path.namespace 或 recovery.zookeeper.path.namespace
+		// 如果上述配置值都没有,则使用appId作为默认值
 		if (zkNamespace == null || zkNamespace.isEmpty()) {
 			// namespace defined in config? else use applicationId as default.
 			zkNamespace = configuration.getString(HighAvailabilityOptions.HA_CLUSTER_ID, String.valueOf(appId));
 			setZookeeperNamespace(zkNamespace);
 		}
-
+		//设置 high-availability.cluster-id 配置值 为 前面设置好的 zkNamespace的值,其实就是yarn的appId的值
 		configuration.setString(HighAvailabilityOptions.HA_CLUSTER_ID, zkNamespace);
 
 		if (HighAvailabilityMode.isHighAvailabilityModeActivated(configuration)) {
@@ -1332,13 +1418,22 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 		}
 	}
 
+	/**
+	 *  获得当前可用的集群资源 其实就是内存
+	 * @param yarnClient
+	 * @return
+	 * @throws YarnException
+	 * @throws IOException
+	 */
 	private ClusterResourceDescription getCurrentFreeClusterResources(YarnClient yarnClient) throws YarnException, IOException {
+		//获取当前正在运行状态的 yarn node 节点列表
 		List<NodeReport> nodes = yarnClient.getNodeReports(NodeState.RUNNING);
 
 		int totalFreeMemory = 0;
 		int containerLimit = 0;
 		int[] nodeManagersFree = new int[nodes.size()];
 
+		//循环正在运行的yarn node 节点列表,得到每一个node的 node情况,通过使用其最大内存减去易用内存得到其可用内存
 		for (int i = 0; i < nodes.size(); i++) {
 			NodeReport rep = nodes.get(i);
 			int free = rep.getCapability().getMemory() - (rep.getUsed() != null ? rep.getUsed().getMemory() : 0);
@@ -1348,6 +1443,8 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 				containerLimit = free;
 			}
 		}
+
+		//返回 可用内存总数, 单个 container 最大的可用内存(其实就是)
 		return new ClusterResourceDescription(totalFreeMemory, containerLimit, nodeManagersFree);
 	}
 
@@ -1623,6 +1720,10 @@ public abstract class AbstractYarnClusterDescriptor implements ClusterDescriptor
 		}
 	}
 
+	/**
+	 * 将要打包上传的文件加到lib 文件夹中
+	 * @param effectiveShipFiles
+	 */
 	protected void addLibFolderToShipFiles(Collection<File> effectiveShipFiles) {
 		// Add lib folder to the ship files if the environment variable is set.
 		// This is for convenience when running from the command-line.

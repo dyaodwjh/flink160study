@@ -236,20 +236,19 @@ public abstract class FileSystem {
 	// ------------------------------------------------------------------------
 
 	/**
-	 * Initializes the shared file system settings.
+	 *  初始化 共享 文件系统设置
+	 *  传递给每个 文件系统工厂 的给定配置 用来初始化 相应的文件系统.
+	 *  因为 在调用这个方法之后, 文件系统的配置可能会不同,这个方法会清除文件系统实例缓存.
 	 *
-	 * <p>The given configuration is passed to each file system factory to initialize the respective
-	 * file systems. Because the configuration of file systems may be different subsequent to the call
-	 * of this method, this method clears the file system instance cache.
+	 *  这个方法也会读取 默认的文件系统URI ,即配置文件中 {@link CoreOptions#DEFAULT_FILESYSTEM_SCHEME} (fs.default-scheme)的值
+	 *  所有调用 {@link FileSystem#get(URI)}  这个方法时传入的URI 如果没有设置schema ,那么将是对应默认文件系统URI的相对路径
 	 *
-	 * <p>This method also reads the default file system URI from the configuration key
-	 * {@link CoreOptions#DEFAULT_FILESYSTEM_SCHEME}. All calls to {@link FileSystem#get(URI)} where
-	 * the URI has no scheme will be interpreted as relative to that URI.
-	 * As an example, assume the default file system URI is set to {@code 'hdfs://localhost:9000/'}.
-	 * A file path of {@code '/user/USERNAME/in.txt'} is interpreted as
-	 * {@code 'hdfs://localhost:9000/user/USERNAME/in.txt'}.
+	 *  例如,假设 默认文件系统URI 是 {@code 'hdfs://localhost:9000/'} 那么  {@code '/user/USERNAME/in.txt' 的 完整路径就是
+	 *  {@code 'hdfs://localhost:9000/user/USERNAME/in.txt'} .
 	 *
-	 * @param config the configuration from where to fetch the parameter.
+	 * @param config   从哪里获取参数的配置
+	 * @throws IOException
+	 * @throws IllegalConfigurationException
 	 */
 	public static void initialize(Configuration config) throws IOException, IllegalConfigurationException {
 		LOCK.lock();

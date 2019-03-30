@@ -56,6 +56,13 @@ public class HighAvailabilityOptions {
 	 * The ID of the Flink cluster, used to separate multiple Flink clusters
 	 * Needs to be set for standalone clusters, is automatically inferred in YARN and Mesos.
 	 */
+	/**
+	 * FLINK 集群ID
+	 * 用于区分 多个 flink 集群
+	 * 对于 standalone 集群需要设置该配置
+	 * 对于yarn和mesos 这个是自动推断的
+	 * 对于yarn来说一般就是appId的值
+	 */
 	public static final ConfigOption<String> HA_CLUSTER_ID =
 			key("high-availability.cluster-id")
 			.defaultValue("/default")
